@@ -1,50 +1,7 @@
 steps:
-  # Step 1: Build the Docker image
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '-t'
-      - 'southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:latest'
-      - '-t'
-      - 'southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:$COMMIT_SHA'
-      - '-f'
-      - 'whatsapp_agent/Dockerfile'
-      - '.'
-
-  # Step 2: Push the image to Artifact Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - 'southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:latest'
-
-  # Step 3: Deploy to Cloud Run
-  - name: 'gcr.io/cloud-builders/gke-deploy'
-    args:
-      - 'run'
-      - '--filename=whatsapp_agent/'
-      - '--image=southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:$COMMIT_SHA'
-      - '--location=southamerica-east1'
-      - '--output=/workspace/output'
-
-  # Step 4: Deploy to Cloud Run using gcloud
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-      - 'run'
-      - 'deploy'
-      - 'lexia-whatsapp-agent'
-      - '--image=southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:$COMMIT_SHA'
-      - '--region=southamerica-east1'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
-      - '--set-env-vars=PHONE_NUMBER_ID=551528574703551,VERIFY_TOKEN=lexia-aoc-2602,WABA_ID=535733579621373'
-      - '--memory=1Gi'
-      - '--cpu=1'
-      - '--timeout=3600'
-
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'southamerica-east1-docker.pkg.dev/lexia-aoc-2602-2/cloud-run-source-deploy/webhook-node:v2.0', '.']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'southamerica-east1-docker.pkg.dev/lexia-aoc-2602-2/cloud-run-source-deploy/webhook-node:v2.0']
 images:
-  - 'southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:latest'
-  - 'southamerica-east1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lexia-whatsapp-agent:$COMMIT_SHA'
-
-options:
-  machineType: 'N1_HIGHCPU_8'
-  logging: CLOUD_LOGGING_ONLY
+- 'southamerica-east1-docker.pkg.dev/lexia-aoc-2602-2/cloud-run-source-deploy/webhook-node:v2.0'

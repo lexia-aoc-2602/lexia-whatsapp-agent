@@ -1,256 +1,245 @@
 #!/usr/bin/env python3
 """
-Lexia WhatsApp Agent - Agent Development Kit (ADK) Integration
-Integrates Google's ADK with WhatsApp Business API and Meta webhooks
+Lexia WhatsApp Agent v2.0
+Integra Google Gemini com WhatsApp Business API via Meta Cloud API
 """
 
 import os
 import json
 import logging
-from typing import Any
-from fastapi import FastAPI, Request, HTTPException
-from google.adk.agents import Agent
-from google.adk.runners import FastAPIRunner
+import httpx
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import PlainTextResponse
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Environment variables for Meta WhatsApp API
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "551528574703551")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "lexia-aoc-2602")
-WABA_ID = os.getenv("WABA_ID", "535733579621373")
+# ─── Configurações Meta / WhatsApp ───────────────────────────────────────────
+PHONE_NUMBER_ID       = os.getenv("PHONE_NUMBER_ID", "978917245310761")
+VERIFY_TOKEN          = os.getenv("VERIFY_TOKEN", "lexia-aoc-2602")
+WABA_ID               = os.getenv("WABA_ID", "2793719140803043")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://graph.facebook.com/v21.0/551528574703551/messages")
+META_API_VERSION      = os.getenv("META_API_VERSION", "v21.0")
 
-# Initialize FastAPI app
-app = FastAPI(title="Lexia WhatsApp Agent", version="1.0.0")
+# ─── Configurações IA ────────────────────────────────────────────────────────
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.manus.im/api/llm-proxy/v1")
+AI_MODEL        = os.getenv("AI_MODEL", "gemini-2.5-flash")
 
-# Create the ADK Agent for WhatsApp
-def create_whatsapp_agent() -> Agent:
-    """Create a WhatsApp-enabled agent using Google ADK"""
-    
-    agent = Agent(
-        name="lexia_whatsapp_agent",
-        model="gemini-2.5-flash",
-        instruction="""Você é Léxia, um assistente de IA amigável e eficiente.
-        
-Sua missão é:
-- Responder perguntas dos usuários de forma clara e concisa
-- Fornecer informações úteis e precisas
-- Manter um tom profissional mas amigável
-- Oferecer ajuda adicional quando necessário
+# ─── Instruções do agente ────────────────────────────────────────────────────
+SYSTEM_PROMPT = """Você é Léxia, assistente de IA da Léxia Locadora de Veículos.
 
-Sempre responda em português brasileiro, a menos que o usuário use outro idioma.""",
-        description="Assistente de IA para WhatsApp Business",
-    )
-    
-    return agent
+Sua missão:
+- Atender clientes com simpatia e profissionalismo
+- Responder dúvidas sobre locação de veículos, preços, disponibilidade e reservas
+- Fornecer informações claras e objetivas
+- Encaminhar para um atendente humano quando necessário
 
-# Initialize the agent
-whatsapp_agent = create_whatsapp_agent()
+Responda sempre em português brasileiro, de forma concisa (máximo 3 parágrafos).
+Nunca invente informações sobre preços ou disponibilidade — diga que vai verificar."""
 
-# Create FastAPI runner for ADK
-runner = FastAPIRunner(agent=whatsapp_agent, app=app)
+app = FastAPI(title="Lexia WhatsApp Agent", version="2.0.0")
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "Lexia WhatsApp Agent",
-        "version": "1.0.0"
+
+async def call_ai(user_message: str, user_name: str = "") -> str:
+    """Chama o modelo de IA e retorna a resposta."""
+    try:
+        system = SYSTEM_PROMPT
+        if user_name:
+            system += f"\n\nO cliente se chama {user_name}."
+
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": AI_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_message},
+            ],
+            "max_tokens": 500,
+            "temperature": 0.7,
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        logger.error(f"Erro ao chamar IA: {e}", exc_info=True)
+        return "Olá! Sou a Léxia, assistente da Léxia Locadora. No momento estou com dificuldades técnicas. Por favor, tente novamente em instantes."
+
+
+async def send_whatsapp_message(to_number: str, text: str) -> bool:
+    """Envia mensagem de texto via Meta Cloud API."""
+    if not WHATSAPP_ACCESS_TOKEN:
+        logger.error("WHATSAPP_ACCESS_TOKEN não configurado!")
+        return False
+
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": text, "preview_url": False},
     }
 
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    """
-    Webhook verification endpoint for Meta WhatsApp Business API
-    Meta sends a GET request to verify the webhook
-    """
     try:
-        verify_token = request.query_params.get("hub.verify_token")
-        challenge = request.query_params.get("hub.challenge")
-        
-        if verify_token != VERIFY_TOKEN:
-            logger.warning(f"Invalid verify token received: {verify_token}")
-            raise HTTPException(status_code=403, detail="Invalid verify token")
-        
-        logger.info("Webhook verified successfully")
-        return int(challenge)
-    
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                logger.info(f"Mensagem enviada para {to_number}")
+                return True
+            else:
+                logger.error(f"Falha ao enviar: {resp.status_code} — {resp.text}")
+                return False
     except Exception as e:
-        logger.error(f"Webhook verification failed: {str(e)}")
-        raise HTTPException(status_code=400, detail="Webhook verification failed")
+        logger.error(f"Erro ao enviar mensagem: {e}", exc_info=True)
+        return False
 
-@app.post("/webhook")
-async def handle_webhook(request: Request):
-    """
-    Handle incoming messages from WhatsApp Business API
-    """
-    try:
-        body = await request.json()
-        logger.info(f"Received webhook payload: {json.dumps(body, indent=2)}")
-        
-        # Check if this is a message event
-        if body.get("object") != "whatsapp_business_account":
-            logger.warning(f"Unexpected object type: {body.get('object')}")
-            return {"status": "ok"}
-        
-        # Extract message details
-        entry = body.get("entry", [{}])[0]
-        changes = entry.get("changes", [{}])[0]
-        value = changes.get("value", {})
-        messages = value.get("messages", [])
-        
-        if not messages:
-            logger.info("No messages in webhook payload")
-            return {"status": "ok"}
-        
-        # Process each message
-        for message in messages:
-            await process_whatsapp_message(message, value)
-        
-        return {"status": "ok"}
-    
-    except Exception as e:
-        logger.error(f"Error handling webhook: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
 
-async def process_whatsapp_message(message: dict, context: dict):
-    """
-    Process incoming WhatsApp message and send response through agent
-    """
+async def mark_as_read(message_id: str):
+    """Marca mensagem como lida."""
+    if not WHATSAPP_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+    }
     try:
-        from_number = message.get("from")
-        message_id = message.get("id")
-        message_type = message.get("type", "text")
-        
-        logger.info(f"Processing message {message_id} from {from_number} (type: {message_type})")
-        
-        # Extract message text
-        user_message = ""
-        if message_type == "text":
-            user_message = message.get("text", {}).get("body", "")
-        elif message_type == "interactive":
-            # Handle interactive messages (buttons, lists, etc.)
-            interactive = message.get("interactive", {})
-            if "button_reply" in interactive:
-                user_message = interactive["button_reply"].get("title", "")
-            elif "list_reply" in interactive:
-                user_message = interactive["list_reply"].get("title", "")
-        
-        if not user_message:
-            logger.warning(f"No text content in message {message_id}")
-            return
-        
-        # Process message through ADK agent
-        logger.info(f"Sending to agent: {user_message}")
-        response = await whatsapp_agent.generate_content(user_message)
-        
-        # Send response back to WhatsApp
-        await send_whatsapp_message(from_number, response)
-        
-        # Mark message as read
-        await mark_message_as_read(message_id)
-        
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, headers=headers, json=payload)
     except Exception as e:
-        logger.error(f"Error processing message: {str(e)}", exc_info=True)
+        logger.warning(f"Não foi possível marcar como lida: {e}")
 
-async def send_whatsapp_message(to_number: str, message_text: str):
-    """
-    Send message to WhatsApp user via Meta API
-    """
-    try:
-        import aiohttp
-        
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": to_number,
-            "type": "text",
-            "text": {
-                "body": message_text
-            }
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                WEBHOOK_URL,
-                json=payload,
-                headers=headers
-            ) as response:
-                if response.status != 200:
-                    logger.error(f"Failed to send message: {response.status}")
-                    logger.error(await response.text())
-                else:
-                    logger.info(f"Message sent successfully to {to_number}")
-    
-    except Exception as e:
-        logger.error(f"Error sending WhatsApp message: {str(e)}", exc_info=True)
 
-async def mark_message_as_read(message_id: str):
-    """
-    Mark message as read in WhatsApp
-    """
-    try:
-        import aiohttp
-        
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "messaging_product": "whatsapp",
-            "status": "read",
-            "message_id": message_id
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages",
-                json=payload,
-                headers=headers
-            ) as response:
-                if response.status != 200:
-                    logger.warning(f"Failed to mark message as read: {response.status}")
-                else:
-                    logger.info(f"Message {message_id} marked as read")
-    
-    except Exception as e:
-        logger.error(f"Error marking message as read: {str(e)}", exc_info=True)
+async def process_message(message: dict, contact: dict):
+    """Processa uma mensagem recebida e envia resposta."""
+    from_number = message.get("from", "")
+    message_id  = message.get("id", "")
+    msg_type    = message.get("type", "text")
+    user_name   = contact.get("profile", {}).get("name", "")
+
+    user_text = ""
+    if msg_type == "text":
+        user_text = message.get("text", {}).get("body", "")
+    elif msg_type == "interactive":
+        interactive = message.get("interactive", {})
+        user_text = (
+            interactive.get("button_reply", {}).get("title")
+            or interactive.get("list_reply", {}).get("title")
+            or ""
+        )
+    elif msg_type == "audio":
+        user_text = "O cliente enviou um áudio."
+    elif msg_type == "image":
+        caption = message.get("image", {}).get("caption", "")
+        user_text = f"O cliente enviou uma imagem. Legenda: {caption}" if caption else "O cliente enviou uma imagem."
+    elif msg_type == "document":
+        user_text = "O cliente enviou um documento."
+    elif msg_type == "location":
+        loc = message.get("location", {})
+        user_text = f"O cliente compartilhou localização: lat={loc.get('latitude')}, lon={loc.get('longitude')}"
+    else:
+        user_text = f"O cliente enviou mensagem do tipo '{msg_type}'."
+
+    if not user_text:
+        logger.warning(f"Mensagem sem conteúdo de {from_number}")
+        return
+
+    logger.info(f"[{from_number}] {user_name}: {user_text}")
+
+    await mark_as_read(message_id)
+
+    response_text = await call_ai(user_text, user_name)
+    logger.info(f"[{from_number}] Resposta: {response_text[:80]}...")
+
+    await send_whatsapp_message(from_number, response_text)
+
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "service": "Lexia WhatsApp Agent",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "webhook": "/webhook",
-            "adk_ui": "/adk"
-        }
+        "ai_available": bool(OPENAI_API_KEY),
+        "model": AI_MODEL,
+        "phone_number_id": PHONE_NUMBER_ID,
+        "token_configured": bool(WHATSAPP_ACCESS_TOKEN),
     }
+
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "Lexia WhatsApp Agent",
+        "version": "2.0.0",
+        "ai_available": bool(OPENAI_API_KEY),
+        "token_configured": bool(WHATSAPP_ACCESS_TOKEN),
+    }
+
+
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    mode      = request.query_params.get("hub.mode")
+    token     = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        logger.info("Webhook verificado!")
+        return PlainTextResponse(content=challenge)
+
+    raise HTTPException(status_code=403, detail="Verificação falhou")
+
+
+@app.post("/webhook")
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        body = await request.json()
+        logger.info(f"Webhook: {json.dumps(body)[:300]}")
+
+        if body.get("object") != "whatsapp_business_account":
+            return {"status": "ok"}
+
+        for entry in body.get("entry", []):
+            for change in entry.get("changes", []):
+                value    = change.get("value", {})
+                messages = value.get("messages", [])
+                contacts = value.get("contacts", [{}])
+
+                for i, message in enumerate(messages):
+                    contact = contacts[i] if i < len(contacts) else {}
+                    background_tasks.add_task(process_message, message, contact)
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"Erro no webhook: {e}", exc_info=True)
+        return {"status": "ok"}
+
 
 if __name__ == "__main__":
     import uvicorn
-    
     port = int(os.getenv("PORT", "8080"))
-    
-    logger.info(f"Starting Lexia WhatsApp Agent on port {port}")
-    logger.info(f"Webhook URL: {WEBHOOK_URL}")
-    logger.info(f"Phone Number ID: {PHONE_NUMBER_ID}")
-    
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info"
-    )
+    logger.info(f"Iniciando Lexia WhatsApp Agent na porta {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
